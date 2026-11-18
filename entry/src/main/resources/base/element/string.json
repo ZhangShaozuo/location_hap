@@ -1,0 +1,6 @@
+{
+  "string": [
+    { "name": "entry_label", "value": "定位服务测试" },
+    { "name": "location_reason", "value": "用于在测试页验证定位接口并显示坐标、精度和回调。" }
+  ]
+}

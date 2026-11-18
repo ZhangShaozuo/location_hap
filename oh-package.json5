@@ -1,0 +1,8 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "location_hap",
+  "version": "1.0.0",
+  "description": "HarmonyOS Location Kit test HAP",
+  "dependencies": {},
+  "devDependencies": {}
+}
