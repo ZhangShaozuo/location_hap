@@ -6,6 +6,8 @@ const APPROXIMATE: Permissions = 'ohos.permission.APPROXIMATELY_LOCATION';
 const PRECISE: Permissions = 'ohos.permission.LOCATION';
 const TIMEOUT_MS = 30_000;
 const MAX_EVENTS = 12;
+const REGION_LOADING = '正在解析地区…';
+const REGION_AFTER_STOP = '停止连续定位后解析最后一个点的地区';
 
 @Entry
 @Component
@@ -17,8 +19,11 @@ struct Index {
   @State private subscribed: boolean = false;
   @State private updateCount: number = 0;
   @State private result: string = '等待定位结果';
+  @State private region: string = '';
   @State private events: string[] = [];
   private visible: boolean = false;
+  private latestLocation?: geoLocationManager.Location;
+  private regionRequestId: number = 0;
   private listener: ((location: geoLocationManager.Location) => void) | undefined = undefined;
   private accessManager = abilityAccessCtrl.createAtManager();
 
@@ -29,11 +34,16 @@ struct Index {
 
   onPageHide(): void {
     this.visible = false;
+    this.regionRequestId++;
+    if (this.region === REGION_LOADING || this.region === REGION_AFTER_STOP) {
+      this.region = '地区未解析，请重新获取定位';
+    }
     this.stopUpdates('页面隐藏');
   }
 
   aboutToDisappear(): void {
     this.visible = false;
+    this.regionRequestId++;
     this.stopUpdates('页面销毁', false);
   }
 
@@ -85,12 +95,62 @@ struct Index {
     }
   }
 
-  private showLocation(source: string, location: geoLocationManager.Location, elapsed: number): void {
+  private showLocation(source: string, location: geoLocationManager.Location, elapsed: number,
+    resolveRegion: boolean = true): void {
+    this.latestLocation = location;
+    this.regionRequestId++;
     const time = new Date(location.timeStamp).toLocaleString();
     this.result = `${source} · ${elapsed} ms\n` +
       `纬度 ${location.latitude.toFixed(6)}° · 经度 ${location.longitude.toFixed(6)}°\n` +
       `精度 ${location.accuracy.toFixed(1)} m\n定位时间 ${time}`;
     this.addEvent(`${source}成功 · ${elapsed} ms · 精度 ${location.accuracy.toFixed(1)} m`);
+    if (resolveRegion) {
+      this.lookupRegion(location);
+    } else {
+      this.region = REGION_AFTER_STOP;
+    }
+  }
+
+  private async lookupRegion(location: geoLocationManager.Location): Promise<void> {
+    if (!this.visible) {
+      this.region = '地区未解析，请重新获取定位';
+      return;
+    }
+    const requestId = this.regionRequestId;
+    this.region = REGION_LOADING;
+    const request: geoLocationManager.ReverseGeoCodeRequest = {
+      latitude: location.latitude,
+      longitude: location.longitude,
+      locale: 'zh',
+      maxItems: 1
+    };
+    try {
+      const addresses = await geoLocationManager.getAddressesFromLocation(request);
+      if (requestId === this.regionRequestId) {
+        this.region = addresses.length > 0 ? this.formatRegion(addresses[0]) : '未查到该坐标的地区';
+      }
+    } catch (error) {
+      if (requestId === this.regionRequestId) {
+        this.region = '地区解析失败，定位坐标可用';
+        this.reportError('解析地区', error as BusinessError);
+      }
+    }
+  }
+
+  private formatRegion(address: geoLocationManager.GeoAddress): string {
+    const country = address.countryName?.trim() || address.countryCode?.trim() || '';
+    const parts: string[] = [];
+    for (const field of [address.administrativeArea, address.subAdministrativeArea, address.locality,
+      address.subLocality]) {
+      const name = field?.trim();
+      if (name && name !== country && !parts.includes(name)) {
+        parts.push(name);
+      }
+    }
+    if (!country && parts.length === 0) {
+      return '未查到该坐标的地区';
+    }
+    return `国家或地区  ${country || '未知'}\n行政区  ${parts.join(' · ') || '暂无'}`;
   }
 
   private async locateOnce(): Promise<void> {
@@ -134,7 +194,7 @@ struct Index {
     const listener = (location: geoLocationManager.Location): void => {
       if (this.visible && this.listener === listener) {
         this.updateCount++;
-        this.showLocation(`连续定位 #${this.updateCount}`, location, this.elapsedSince(start));
+        this.showLocation(`连续定位 #${this.updateCount}`, location, this.elapsedSince(start), false);
       }
     };
 
@@ -161,6 +221,10 @@ struct Index {
       if (updateView) {
         this.subscribed = false;
         this.addEvent(`已取消订阅（${reason}），共收到 ${this.updateCount} 次回调`);
+        const location = this.latestLocation;
+        if (this.visible && location !== undefined && this.region === REGION_AFTER_STOP) {
+          this.lookupRegion(location);
+        }
       }
     } catch (error) {
       if (updateView) {
@@ -216,6 +280,9 @@ struct Index {
         Column({ space: 8 }) {
           Text('最近一次定位').fontSize(18).fontWeight(FontWeight.Medium)
           Text(this.result).fontSize(15).lineHeight(23)
+          if (this.region.length > 0) {
+            Text(this.region).fontSize(15).lineHeight(23).fontColor('#143832')
+          }
         }
         .width('100%')
         .padding(16)
