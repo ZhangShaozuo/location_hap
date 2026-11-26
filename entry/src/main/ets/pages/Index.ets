@@ -1,6 +1,7 @@
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
 import { geoLocationManager } from '@kit.LocationKit';
+import { getCityLocation, getRegionalLocation, LocationDisclosureError } from '../location/LocationDisclosure';
 
 const APPROXIMATE: Permissions = 'ohos.permission.APPROXIMATELY_LOCATION';
 const PRECISE: Permissions = 'ohos.permission.LOCATION';
@@ -16,6 +17,8 @@ struct Index {
   @State private locationSwitch: string = '待查询';
   @State private requestingPermission: boolean = false;
   @State private locating: boolean = false;
+  @State private disclosing: boolean = false;
+  @State private disclosureResult: string = '请选择区域级或城市级';
   @State private subscribed: boolean = false;
   @State private updateCount: number = 0;
   @State private result: string = '等待定位结果';
@@ -24,6 +27,7 @@ struct Index {
   private visible: boolean = false;
   private latestLocation?: geoLocationManager.Location;
   private regionRequestId: number = 0;
+  private disclosureRequestId: number = 0;
   private listener: ((location: geoLocationManager.Location) => void) | undefined = undefined;
   private accessManager = abilityAccessCtrl.createAtManager();
 
@@ -35,6 +39,11 @@ struct Index {
   onPageHide(): void {
     this.visible = false;
     this.regionRequestId++;
+    this.disclosureRequestId++;
+    if (this.disclosing) {
+      this.disclosing = false;
+      this.disclosureResult = '请重新获取位置';
+    }
     if (this.region === REGION_LOADING || this.region === REGION_AFTER_STOP) {
       this.region = '地区未解析，请重新获取定位';
     }
@@ -44,6 +53,7 @@ struct Index {
   aboutToDisappear(): void {
     this.visible = false;
     this.regionRequestId++;
+    this.disclosureRequestId++;
     this.stopUpdates('页面销毁', false);
   }
 
@@ -81,17 +91,61 @@ struct Index {
     }
   }
 
-  private async requestPermission(): Promise<void> {
+  private async requestPermission(includePrecise: boolean = true): Promise<void> {
     this.requestingPermission = true;
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const response = await this.accessManager.requestPermissionsFromUser(context, [APPROXIMATE, PRECISE]);
+      const permissions: Permissions[] = includePrecise ? [APPROXIMATE, PRECISE] : [APPROXIMATE];
+      const response = await this.accessManager.requestPermissionsFromUser(context, permissions);
       this.addEvent(`权限请求返回 [${response.authResults.join(', ')}]`);
     } catch (error) {
       this.reportError('申请权限', error as BusinessError);
     } finally {
       this.refreshStatus();
       this.requestingPermission = false;
+    }
+  }
+
+  private currentLocationRequest(): geoLocationManager.CurrentLocationRequest {
+    return {
+      priority: geoLocationManager.LocationRequestPriority.FIRST_FIX,
+      scenario: geoLocationManager.LocationRequestScenario.UNSET,
+      timeoutMs: TIMEOUT_MS
+    };
+  }
+
+  private async discloseLocation(tier: 'regional' | 'city'): Promise<void> {
+    const name = tier === 'regional' ? '区域级模糊' : '城市级模糊';
+    const requestId = ++this.disclosureRequestId;
+    const start = systemDateTime.getUptime(systemDateTime.TimeType.STARTUP);
+    this.disclosing = true;
+    this.disclosureResult = `${name} · 请求中…`;
+    try {
+      let result: string;
+      if (tier === 'regional') {
+        const location = await getRegionalLocation(this.currentLocationRequest());
+        result = `S2 Level ${location.s2Level} 网格中心\n` +
+          `纬度 ${location.latitude.toFixed(6)}° · 经度 ${location.longitude.toFixed(6)}°`;
+      } else {
+        const location = await getCityLocation();
+        result = location.city;
+      }
+      if (this.visible && requestId === this.disclosureRequestId) {
+        this.disclosureResult = `${name} · ${this.elapsedSince(start)} ms\n${result}`;
+        this.addEvent(`${name}成功 · ${this.elapsedSince(start)} ms`);
+      }
+    } catch (error) {
+      if (this.visible && requestId === this.disclosureRequestId) {
+        const code = (error as BusinessError).code;
+        const message = error instanceof LocationDisclosureError ? error.message :
+          `获取失败（${code ?? '无错误码'}）`;
+        this.disclosureResult = `${name} · ${message}`;
+        this.addEvent(`${name}失败（${code ?? '无错误码'}）`);
+      }
+    } finally {
+      if (requestId === this.disclosureRequestId) {
+        this.disclosing = false;
+      }
     }
   }
 
@@ -156,11 +210,7 @@ struct Index {
   private async locateOnce(): Promise<void> {
     this.locating = true;
     const start = systemDateTime.getUptime(systemDateTime.TimeType.STARTUP);
-    const request: geoLocationManager.CurrentLocationRequest = {
-      priority: geoLocationManager.LocationRequestPriority.FIRST_FIX,
-      scenario: geoLocationManager.LocationRequestScenario.UNSET,
-      timeoutMs: TIMEOUT_MS
-    };
+    const request = this.currentLocationRequest();
     this.addEvent('已发起单次定位，超时 30 秒');
     try {
       const location = await geoLocationManager.getCurrentLocation(request);
@@ -249,22 +299,48 @@ struct Index {
 
         Column({ space: 8 }) {
           Button('申请定位权限')
-            .enabled(!this.requestingPermission && !this.subscribed && !this.locating)
+            .enabled(!this.requestingPermission && !this.subscribed && !this.locating && !this.disclosing)
             .width('100%')
             .onClick(() => { this.requestPermission(); })
+          Button('仅申请模糊定位权限')
+            .enabled(!this.requestingPermission && !this.subscribed && !this.locating && !this.disclosing)
+            .width('100%')
+            .onClick(() => { this.requestPermission(false); })
           Button('刷新开关和权限')
             .width('100%')
             .onClick(() => { this.refreshStatus(); })
+        }.width('100%')
+
+        Column({ space: 8 }) {
+          Text('位置披露测试').fontSize(18).fontWeight(FontWeight.Medium)
+          Button('区域级模糊 · S2 网格中心')
+            .enabled(!this.requestingPermission && !this.locating && !this.subscribed && !this.disclosing)
+            .width('100%')
+            .onClick(() => { this.discloseLocation('regional'); })
+          Button('城市级模糊 · 仅城市')
+            .enabled(!this.requestingPermission && !this.locating && !this.subscribed && !this.disclosing)
+            .width('100%')
+            .onClick(() => { this.discloseLocation('city'); })
+          Text(this.disclosureResult).fontSize(15).lineHeight(23).width('100%')
+        }
+        .width('100%')
+        .padding(16)
+        .alignItems(HorizontalAlign.Start)
+        .backgroundColor(Color.White)
+        .borderRadius(12)
+
+        Column({ space: 8 }) {
+          Text('原始定位诊断').fontSize(18).fontWeight(FontWeight.Medium)
           Button(this.locating ? '正在定位…' : '获取单次定位')
-            .enabled(!this.requestingPermission && !this.locating)
+            .enabled(!this.requestingPermission && !this.locating && !this.disclosing)
             .width('100%')
             .onClick(() => { this.locateOnce(); })
           Button('读取缓存定位')
-            .enabled(!this.requestingPermission)
+            .enabled(!this.requestingPermission && !this.disclosing)
             .width('100%')
             .onClick(() => { this.readLastLocation(); })
           Button(this.subscribed ? '停止连续定位' : '开始连续定位')
-            .enabled(!this.requestingPermission)
+            .enabled(!this.requestingPermission && !this.disclosing)
             .width('100%')
             .onClick(() => {
               if (this.subscribed) {
@@ -273,7 +349,7 @@ struct Index {
                 this.startUpdates();
               }
             })
-        }.width('100%')
+        }.width('100%').alignItems(HorizontalAlign.Start)
 
         Text(`订阅${this.subscribed ? '进行中' : '未开启'} · 本轮回调 ${this.updateCount} 次`)
           .fontSize(15)

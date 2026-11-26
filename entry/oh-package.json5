@@ -2,5 +2,7 @@
   "name": "entry",
   "version": "1.0.0",
   "description": "Location Kit test entry module",
-  "dependencies": {}
+  "dependencies": {
+    "liblocation_s2.so": "file:./src/main/cpp/types/liblocation_s2"
+  }
 }

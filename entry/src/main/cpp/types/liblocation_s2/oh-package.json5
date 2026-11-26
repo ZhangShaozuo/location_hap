@@ -1,0 +1,6 @@
+{
+  "name": "liblocation_s2.so",
+  "version": "1.0.0",
+  "description": "Native S2 grid center conversion",
+  "types": "./index.d.ts"
+}
